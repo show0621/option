@@ -1,5 +1,5 @@
 import streamlit as st
-import pandas as pd  # <--- 關鍵：這行有保留
+import pandas as pd
 from data_loader import get_cleaned_data
 from strategy import run_backtest
 import plotly.express as px
@@ -19,6 +19,13 @@ if st.sidebar.button("開始回測"):
         df_fut, df_opt = get_cleaned_data(start_date, end_date)
         
     if df_fut is not None and not df_fut.empty:
+        # --- 🔍 新增的診斷代碼：肉搜真實欄位名稱 ---
+        st.write("### 🛠️ 選擇權資料欄位診斷")
+        st.write("這份資料目前的欄位有：", df_opt.columns.tolist())
+        st.info("請確認上方列表中，哪一個是『履約價』、哪一個是『收盤價』。確認完後即可刪除這兩行並繼續回測。")
+        st.stop() # 程式會在此暫停，方便你查看結果
+        # ------------------------------------------
+
         st.success(f"成功載入 {len(df_fut)} 筆數據")
         
         # 執行回測
@@ -31,12 +38,10 @@ if st.sidebar.button("開始回測"):
             col2.metric("交易次數", len(logs_df))
             col3.metric("平均損益%", f"{logs_df['損益%'].mean():.2f}%")
             
-            # --- 修正處 1：對齊 strategy.py 的欄位名稱 ---
-            # 損益曲線圖
+            # 損益曲線圖 (欄位名稱已對齊最新版 strategy.py)
             fig = px.line(logs_df, x="出場時間", y="帳戶餘額", title="權益曲線 (Equity Curve)")
             st.plotly_chart(fig, use_container_width=True)
             
-            # --- 修正處 2：對齊 strategy.py 的欄位名稱與格式 ---
             # 交易明細
             st.subheader("交易明細")
             st.dataframe(logs_df.style.format({
