@@ -1,0 +1,6 @@
+streamlit
+finmind
+pandas
+pandas_ta
+scikit-learn
+plotly
