@@ -1,13 +1,16 @@
 import streamlit as st
+import pandas as pd  # <--- 關鍵：補上這行！
 from data_loader import get_cleaned_data
 from strategy import run_backtest
 import plotly.express as px
 
+# 設定網頁標題與佈局
 st.set_page_config(page_title="台指期多時框共振系統", layout="wide")
 st.title("📈 多時框動能共振回測 (60K + 日K)")
 
 # 側邊欄設定
 st.sidebar.header("回測設定")
+# 修正處：確保 pd 已經定義
 start_date = st.sidebar.date_input("開始日期", value=pd.to_datetime("2025-01-01"))
 end_date = st.sidebar.date_input("結束日期", value=pd.to_datetime("2026-04-23"))
 
@@ -16,7 +19,7 @@ if st.sidebar.button("開始回測"):
         df_fut, df_opt = get_cleaned_data(start_date, end_date)
         
     if df_fut is not None and not df_fut.empty:
-        st.success(f"成功載入 {len(df_fut)} 筆小時線數據")
+        st.success(f"成功載入 {len(df_fut)} 筆數據")
         
         # 執行回測
         logs_df, final_balance = run_backtest(df_fut, df_opt)
@@ -34,8 +37,12 @@ if st.sidebar.button("開始回測"):
             
             # 交易明細
             st.subheader("交易明細")
-            st.dataframe(logs_df.style.format({"損益%": "{:.2f}%", "餘額": "${:,.0f}"}), use_container_width=True)
+            # 格式化顯示，讓表格更美觀
+            st.dataframe(logs_df.style.format({
+                "損益%": "{:.2f}%", 
+                "餘額": "${:,.0f}"
+            }), use_container_width=True)
         else:
             st.warning("在此區間內未發現符合共振條件的進場點。")
     else:
-        st.error("找不到期貨資料，請確認檔案已正確上傳至 GitHub。")
+        st.error("找不到資料，請確認檔案名稱與 GitHub 路徑是否正確。")
