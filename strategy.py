@@ -1,98 +1,85 @@
 import pandas as pd
 import pandas_ta as ta
-from sklearn.ensemble import RandomForestClassifier
-import numpy as np
 
-def train_rolling_model(df, train_window=120, test_window=20):
-    df = df.copy()
-    # 統一小寫欄位
-    df.columns = [c.lower() for c in df.columns]
+def prepare_indicators(df_1h):
+    """合成多時框並計算 EMA 動能指標"""
+    df = df_1h.copy()
+    df.set_index('date', inplace=True)
     
-    # 計算指標
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['ema_fast'] = ta.ema(df['close'], length=12)
-    df['ema_slow'] = ta.ema(df['close'], length=26)
+    # 1. 計算 60分K 的指標 (EMA 20)
+    df['ema_60k'] = ta.ema(df['close'], length=20)
     
-    if 'high' in df.columns and 'low' in df.columns:
-        df['willr'] = ta.willr(df['high'], df['low'], df['close'], length=14)
-    else:
-        df['willr'] = df['rsi']
-        
-    df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
-    df = df.dropna()
+    # 2. 合成 日K 並計算指標 (EMA 20)
+    logic = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
+    df_day = df.resample('D').apply(logic).dropna()
+    df_day['ema_day'] = ta.ema(df_day['close'], length=20)
     
-    features = ['rsi', 'willr', 'ema_fast', 'ema_slow']
-    all_preds = []
-    
-    if len(df) < (train_window + test_window):
-        return pd.DataFrame()
+    return df, df_day
 
-    for i in range(train_window, len(df) - test_window, test_window):
-        train_df = df.iloc[i-train_window : i]
-        test_df = df.iloc[i : i+test_window].copy()
-        
-        model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-        model.fit(train_df[features], train_df['target'])
-        
-        test_df['ai_prob'] = model.predict_proba(test_df[features])[:, 1]
-        all_preds.append(test_df)
-        
-    return pd.concat(all_preds) if all_preds else pd.DataFrame()
-
-def run_backtest(df_fut, df_opt, ai_results, threshold=0.55):
+def run_backtest(df_1h, df_opt):
+    """小時線與日線動能共振回測"""
+    df_60k, df_day = prepare_indicators(df_1h)
+    
     balance = 100000
     position = None
     logs = []
     
-    df_fut.columns = [c.lower() for c in df_fut.columns]
-    df_main = df_fut.merge(ai_results[['ai_prob']], left_index=True, right_index=True, how='inner')
+    for date, row in df_60k.iterrows():
+        # 取得當下的日線指標狀態
+        try:
+            current_day_data = df_day.asof(date)
+        except: continue
 
-    for date, row in df_main.iterrows():
+        # --- A. 出場邏輯 (簡單條件：獲利 25% 或 持有超過 4 小時) ---
         if position:
-            today_opt = df_opt[df_opt['date'] == date]
-            target_opt = today_opt[(today_opt['strike_price'] == position['strike']) & 
-                                   (today_opt['type'] == position['type'])]
+            d_str = date.strftime('%Y-%m-%d')
+            opt_today = df_opt[df_opt['date'] == d_str]
+            target_opt = opt_today[(opt_today['strike_price'] == position['strike']) & 
+                                   (opt_today['type'] == position['type'])]
             
             if not target_opt.empty:
                 curr_p = target_opt['settlement_price'].iloc[0]
-                pnl_pct = (curr_p - position['entry_price']) / position['entry_price']
+                pnl = (curr_p - position['entry_price']) / position['entry_price']
+                hold_hours = (date - position['entry_date']).seconds / 3600
                 
-                hold_days = (date - position['entry_date']).days
-                if pnl_pct >= 0.3 or pnl_pct <= -0.25 or hold_days >= 3:
+                if pnl >= 0.25 or pnl <= -0.2 or hold_hours >= 4:
                     profit = (curr_p - position['entry_price']) * 50
                     balance += (position['cost'] + profit)
                     logs.append({
                         "進場日期": position['entry_date'],
                         "出場日期": date,
                         "類型": position['type'],
-                        "履約價": position['strike'],
-                        "損益%": round(pnl_pct * 100, 2),
+                        "損益%": round(pnl*100, 2),
                         "餘額": balance
                     })
                     position = None
 
+        # --- B. 進場邏輯 (多時框共振) ---
         if not position:
-            is_call = row['ai_prob'] >= threshold
-            is_put = row['ai_prob'] <= (1 - threshold)
+            # 多頭共振：60K 高於 EMA 且 日K 高於 EMA
+            is_bull = (row['close'] > row['ema_60k']) and (row['close'] > current_day_data['ema_day'])
+            # 空頭共振：60K 低於 EMA 且 日K 低於 EMA
+            is_bear = (row['close'] < row['ema_60k']) and (row['close'] < current_day_data['ema_day'])
             
-            if is_call or is_put:
-                side = "Call" if is_call else "Put"
-                opt_date_df = df_opt[df_opt['date'] == date]
+            if is_bull or is_bear:
+                side = "Call" if is_bull else "Put"
+                d_str = date.strftime('%Y-%m-%d')
+                opt_day = df_opt[df_opt['date'] == d_str]
                 
-                if not opt_date_df.empty:
-                    df_side = opt_date_df[opt_date_df['type'] == side]
+                if not opt_day.empty:
+                    df_side = opt_day[opt_day['type'] == side]
                     if not df_side.empty:
+                        # 買入 ATM 合約
                         idx = (df_side['strike_price'] - row['close']).abs().idxmin()
-                        target_opt = df_side.loc[idx]
-                        entry_price = target_opt['settlement_price']
-                        if entry_price > 0:
-                            cost = entry_price * 50
+                        target = df_side.loc[idx]
+                        if target['settlement_price'] > 0:
+                            cost = target['settlement_price'] * 50
                             balance -= cost
                             position = {
                                 "entry_date": date,
-                                "strike": target_opt['strike_price'],
+                                "strike": target['strike_price'],
                                 "type": side,
-                                "entry_price": entry_price,
+                                "entry_price": target['settlement_price'],
                                 "cost": cost
                             }
                         
