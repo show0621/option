@@ -44,11 +44,10 @@ def run_backtest(df_60k, df_opt, initial_capital=100000):
                 # 自動尋找最接近的百位數履約價 (價平)
                 strike = round(row['close'] / 100) * 100
                 
-                # 從 df_opt 篩選：1. 時間對齊 2. 履約價 3. 型態 4. 排除週選(通常月選合約代碼較短或不含W)
-                # 假設 df_opt 已包含 'strike', 'type', 'settlement_price'
+                # --- 🔑 修正處：將 'strike' 改為 'strike_price' ---
                 opt_data = df_opt[
                     (df_opt['date'] == timestamp) & 
-                    (df_opt['strike'] == strike) & 
+                    (df_opt['strike_price'] == strike) & 
                     (df_opt['type'] == opt_type)
                 ]
                 
@@ -71,10 +70,10 @@ def run_backtest(df_60k, df_opt, initial_capital=100000):
                 is_exit = True
             
             if is_exit:
-                # 抓取出場時的選擇權價格
+                # --- 🔑 修正處：將 'strike' 改為 'strike_price' ---
                 exit_opt_data = df_opt[
                     (df_opt['date'] == timestamp) & 
-                    (df_opt['strike'] == active_pos['strike']) & 
+                    (df_opt['strike_price'] == active_pos['strike']) & 
                     (df_opt['type'] == active_pos['type'].split()[1])
                 ]
                 
