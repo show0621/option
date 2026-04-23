@@ -1,5 +1,5 @@
 import streamlit as st
-import pandas as pd  # <--- 關鍵：補上這行！
+import pandas as pd  # <--- 關鍵：這行有保留
 from data_loader import get_cleaned_data
 from strategy import run_backtest
 import plotly.express as px
@@ -10,7 +10,7 @@ st.title("📈 多時框動能共振回測 (60K + 日K)")
 
 # 側邊欄設定
 st.sidebar.header("回測設定")
-# 修正處：確保 pd 已經定義
+# 確保 pd 已經定義
 start_date = st.sidebar.date_input("開始日期", value=pd.to_datetime("2025-01-01"))
 end_date = st.sidebar.date_input("結束日期", value=pd.to_datetime("2026-04-23"))
 
@@ -31,16 +31,20 @@ if st.sidebar.button("開始回測"):
             col2.metric("交易次數", len(logs_df))
             col3.metric("平均損益%", f"{logs_df['損益%'].mean():.2f}%")
             
+            # --- 修正處 1：對齊 strategy.py 的欄位名稱 ---
             # 損益曲線圖
-            fig = px.line(logs_df, x="出場日期", y="餘額", title="權益曲線 (Equity Curve)")
+            fig = px.line(logs_df, x="出場時間", y="帳戶餘額", title="權益曲線 (Equity Curve)")
             st.plotly_chart(fig, use_container_width=True)
             
+            # --- 修正處 2：對齊 strategy.py 的欄位名稱與格式 ---
             # 交易明細
             st.subheader("交易明細")
-            # 格式化顯示，讓表格更美觀
             st.dataframe(logs_df.style.format({
+                "進場價": "{:.2f}",
+                "出場價": "{:.2f}",
+                "點數損益": "{:.2f}",
                 "損益%": "{:.2f}%", 
-                "餘額": "${:,.0f}"
+                "帳戶餘額": "${:,.0f}" 
             }), use_container_width=True)
         else:
             st.warning("在此區間內未發現符合共振條件的進場點。")
