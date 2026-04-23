@@ -2,11 +2,13 @@ import pandas as pd
 import pandas_ta as ta
 import streamlit as st
 
-def run_backtest(df_60k, df_opt, initial_capital=100000):
+def run_backtest(df_60k, df_opt=None, initial_capital=100000):
+    """
+    台指期 60K 共振精準回測 + 選擇權(價平 Delta=0.5) 損益推算
+    """
     df_60k = df_60k.copy()
-    df_opt = df_opt.copy()
     
-    # --- 1. 時間格式與時區修正 (60分K) ---
+    # 1. 確保時間格式精準 (保留 10:00, 11:00 等盤中時間)
     try:
         if 'date' in df_60k.columns:
             df_60k['date'] = pd.to_datetime(df_60k['date']) + pd.Timedelta(hours=8)
@@ -16,18 +18,7 @@ def run_backtest(df_60k, df_opt, initial_capital=100000):
     except:
         pass
 
-    # --- 👑 2. 選擇權資料庫「強效對齊」處理 ---
-    try:
-        # 將選擇權時間統一去掉時分秒，只保留日期 (normalize)
-        df_opt['date'] = pd.to_datetime(df_opt['date']).dt.normalize()
-        # 確保履約價是數字格式
-        df_opt['strike_price'] = pd.to_numeric(df_opt['strike_price'], errors='coerce')
-        # 確保 Type 統一包含 'Call' 或 'Put' (解決大小寫或前後空白問題)
-        df_opt['type'] = df_opt['type'].astype(str).str.strip().str.capitalize()
-    except Exception as e:
-        st.error(f"選擇權資料預處理異常: {e}")
-
-    # --- 3. 指標計算與日線趨勢對齊 ---
+    # 2. 指標計算與日線趨勢對齊 (用昨日收盤對齊今日盤中)
     df_60k = df_60k.sort_index()
     df_60k['ema20'] = ta.ema(df_60k['close'], length=20)
     
@@ -41,101 +32,55 @@ def run_backtest(df_60k, df_opt, initial_capital=100000):
     daily_trend_map = df_daily['trend_d'].shift(1).to_dict()
     df_60k['daily_filter'] = df_60k.index.normalize().map(daily_trend_map)
 
-    # --- 4. 買進訊號定義 ---
+    # 3. 買進訊號定義
     df_60k['buy_call_signal'] = (df_60k['close'] > df_60k['ema20']) & (df_60k['daily_filter'] == 1)
     df_60k['buy_put_signal'] = (df_60k['close'] < df_60k['ema20']) & (df_60k['daily_filter'] == -1)
 
-    # 在 Streamlit 顯示到底觸發了多少次訊號
-    st.write("### 📊 策略引擎內部診斷")
-    st.write(f"- 期貨共振訊號觸發次數：{int(df_60k['buy_call_signal'].sum() + df_60k['buy_put_signal'].sum())} 次")
-    
-    # --- 5. 模擬月選回測迴圈 ---
+    # 4. 模擬回測迴圈 (以期貨盤中精準點位進出)
     balance = initial_capital
     trade_logs = []
     active_pos = None
-    matched_trades = 0 # 計算成功找到選擇權報價的次數
 
     for timestamp, row in df_60k.iterrows():
-        # A. 進場：尋找月選報價
+        # 進場：使用盤中真實的期貨價格
         if active_pos is None:
-            if row['buy_call_signal'] or row['buy_put_signal']:
-                opt_type = 'Call' if row['buy_call_signal'] else 'Put'
-                strike = round(row['close'] / 100) * 100
-                
-                # 將期貨訊號時間去尾數，只留日期去跟 df_opt 對齊
-                target_date = pd.to_datetime(timestamp).normalize()
-                
-                # 精準搜尋
-                opt_data = df_opt[
-                    (df_opt['date'] == target_date) & 
-                    (df_opt['strike_price'] == strike) & 
-                    (df_opt['type'].str.contains(opt_type, case=False, na=False))
-                ]
-                
-                if not opt_data.empty:
-                    # 如果同一天有多個月分合約，優先選近月 (假設有 contract_date 欄位)
-                    if 'contract_date' in opt_data.columns:
-                        opt_data = opt_data.sort_values('contract_date')
-                        
-                    entry_p = opt_data.iloc[0]['settlement_price']
-                    
-                    # 避免抓到 0 元或空值的極端報價
-                    if pd.notna(entry_p) and entry_p > 0:
-                        active_pos = {
-                            "type": f"Buy {opt_type}", 
-                            "strike": strike, 
-                            "entry_p": entry_p, 
-                            "time": timestamp,
-                            "entry_date": target_date 
-                        }
-                        matched_trades += 1
-
-        # B. 出場：共振消失或跌破/突破 EMA20
+            if row['buy_call_signal']:
+                active_pos = {"type": "BC", "entry_p": row['close'], "time": timestamp}
+            elif row['buy_put_signal']:
+                active_pos = {"type": "BP", "entry_p": row['close'], "time": timestamp}
+        
+        # 出場：盤中即時跌破/突破就出場
         elif active_pos:
             is_exit = False
-            if "Call" in active_pos['type'] and row['close'] < row['ema20']:
+            if active_pos["type"] == "BC" and row['close'] < row['ema20']:
                 is_exit = True
-            elif "Put" in active_pos['type'] and row['close'] > row['ema20']:
+            elif active_pos["type"] == "BP" and row['close'] > row['ema20']:
                 is_exit = True
             
             if is_exit:
-                exit_target_date = pd.to_datetime(timestamp).normalize()
-                opt_type_str = active_pos['type'].split()[1] # 取得 Call 或 Put
+                # 計算期貨真實賺賠的點數
+                pnl_points = (row['close'] - active_pos['entry_p']) if active_pos["type"] == "BC" else (active_pos['entry_p'] - row['close'])
                 
-                exit_opt_data = df_opt[
-                    (df_opt['date'] == exit_target_date) & 
-                    (df_opt['strike_price'] == active_pos['strike']) & 
-                    (df_opt['type'].str.contains(opt_type_str, case=False, na=False))
-                ]
+                # === 關鍵：推算選擇權的真實損益 ===
+                # 假設買進價平(ATM)，Delta 約為 0.5。期貨賺 100 點，選擇權大約賺 50 點。
+                # 假設進場時的價平權利金約為 150 點 (這裡用固定概算，你實戰時以當時報價為準)
+                est_opt_points = pnl_points * 0.5 
+                assumed_opt_premium = 150 
                 
-                if not exit_opt_data.empty:
-                    if 'contract_date' in exit_opt_data.columns:
-                        exit_opt_data = exit_opt_data.sort_values('contract_date')
-                        
-                    exit_p = exit_opt_data.iloc[0]['settlement_price']
-                    
-                    if pd.notna(exit_p) and exit_p > 0:
-                        pnl = exit_p - active_pos['entry_p']
-                        pnl_pct = (pnl / active_pos['entry_p'] * 100) if active_pos['entry_p'] > 0 else 0
-                        
-                        balance += pnl * 50 # 選擇權一口跳動 50 元
-                        
-                        trade_logs.append({
-                            "進場時間": active_pos["time"],
-                            "出場時間": timestamp,
-                            "類型": active_pos["type"],
-                            "履約價": active_pos["strike"],
-                            "權利金進場": active_pos["entry_p"],
-                            "權利金出場": exit_p,
-                            "點數損益": round(pnl, 2),
-                            "損益%": round(pnl_pct, 2),
-                            "帳戶餘額": int(balance)
-                        })
-                        active_pos = None
-                else:
-                    # 如果出場那天剛好沒抓到報價，為了避免卡單，強制用隔天或忽略 (這裡先直接平倉解鎖)
-                    active_pos = None 
+                opt_pnl_pct = (est_opt_points / assumed_opt_premium) * 100
+                balance += est_opt_points * 50 # 選擇權一口跳動 50 元
+                
+                trade_logs.append({
+                    "進場時間": active_pos["time"],
+                    "出場時間": timestamp,
+                    "類型": active_pos["type"],
+                    "期貨進場價": round(active_pos['entry_p'], 2),
+                    "期貨出場價": round(row['close'], 2),
+                    "大盤價差": round(pnl_points, 2),
+                    "預估選擇權點數": round(est_opt_points, 2), # Delta 0.5 推算
+                    "損益%": round(opt_pnl_pct, 2),
+                    "帳戶餘額": int(balance)
+                })
+                active_pos = None
 
-    st.write(f"- 成功匹配到選擇權報價進場次數：{matched_trades} 次")
-    
     return pd.DataFrame(trade_logs), balance
